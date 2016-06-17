@@ -3124,15 +3124,18 @@ elf_link_is_defined_archive_symbol (bfd * abfd, carsym * symdef)
   if (abfd == NULL)
     return FALSE;
 
-  /* Return FALSE if the object has been claimed by plugin.  */
-  if (abfd->plugin_format == bfd_plugin_yes)
-    return FALSE;
-
   if (! bfd_check_format (abfd, bfd_object))
     return FALSE;
 
   /* Select the appropriate symbol table.  */
-  if ((abfd->flags & DYNAMIC) == 0 || elf_dynsymtab (abfd) == 0)
+  if (abfd->plugin_format == bfd_plugin_yes)
+    {
+      /* Use the IR symbol table if the object has been claimed by
+	 plugin.  */
+      abfd = abfd->plugin_dummy_bfd;
+      hdr = &elf_tdata (abfd)->symtab_hdr;
+    }
+  else if ((abfd->flags & DYNAMIC) == 0 || elf_dynsymtab (abfd) == 0)
     hdr = &elf_tdata (abfd)->symtab_hdr;
   else
     hdr = &elf_tdata (abfd)->dynsymtab_hdr;
