@@ -41,6 +41,12 @@
 #include "mach-o.h"
 #include "mach-o/external.h"
 
+/* TODO: Temporary fix */
+#include <mach/mach_vm.h>
+#include <mach/vm_region.h>
+#include "darwin-nat.h"
+/* End temporary fix */
+
 struct gdb_dyld_image_info
 {
   /* Base address (which corresponds to the Mach-O header).  */
@@ -67,7 +73,7 @@ struct gdb_dyld_all_image_infos
 
 /* Current all_image_infos version.  */
 #define DYLD_VERSION_MIN 1
-#define DYLD_VERSION_MAX 14
+#define DYLD_VERSION_MAX 15
 
 /* Per PSPACE specific data.  */
 struct darwin_info
@@ -149,6 +155,86 @@ darwin_load_image_infos (struct darwin_info *info)
   info->all_image.info = extract_typed_address (buf + 8, ptr_type);
   info->all_image.notifier = extract_typed_address
     (buf + 8 + TYPE_LENGTH (ptr_type), ptr_type);
+
+  /* Shitty patch for OS X 10.12+ /usr/lib/dyld
+   * OS X 10.12.2: vmaddr 0x000000000000000
+   * OS X 10.11.6: vmaddr 0x00007fff5fc00000 
+   * Inspired by darwin-nat-info.c */
+  if (info->all_image.version >= 15) {
+    mach_vm_address_t address = 0;
+    struct inferior *inf = current_inferior ();
+    task_t task = inf->priv->task;
+
+    kern_return_t kret;
+    vm_region_basic_info_data_64_t current_info, prev_info;
+    mach_vm_address_t prev_address;
+    mach_vm_size_t size, prev_size;
+
+    mach_port_t object_name;
+    mach_msg_type_number_t count;
+
+    count = VM_REGION_BASIC_INFO_COUNT_64;
+    kret = mach_vm_region (task, &address, &size, VM_REGION_BASIC_INFO_64,
+        (vm_region_info_t) &current_info, &count, &object_name);
+    if (kret != KERN_SUCCESS)
+      {
+	goto error_return;
+      }
+    memcpy (&prev_info, &current_info, sizeof (vm_region_basic_info_data_64_t));
+    prev_address = address;
+    prev_size = size;
+
+    for (;;)
+      {
+	int check = 0;
+	address = prev_address + prev_size;
+
+	if (address >= info->all_image_addr) 
+	  {
+	    if (info->all_image.notifier < prev_address)
+	      {
+		info->all_image.notifier += prev_address;
+	      }
+	    return;
+	  }
+
+	/* Check to see if address space has wrapped around.  */
+	if (address == 0)
+	   goto error_return;
+
+	count = VM_REGION_BASIC_INFO_COUNT_64;
+	kret = mach_vm_region (task, &address, &size, VM_REGION_BASIC_INFO_64,
+				(vm_region_info_t) &current_info, &count, &object_name);
+	if (kret != KERN_SUCCESS)
+	  goto error_return;
+
+      if (address != prev_address + prev_size)
+        check = 1;
+
+      if ((current_info.protection != prev_info.protection)
+          || (current_info.max_protection != prev_info.max_protection)
+          || (current_info.inheritance != prev_info.inheritance)
+          || (current_info.shared != prev_info.reserved)
+          || (current_info.reserved != prev_info.reserved))
+        check = 1;
+
+	if (check)
+	  {
+	    prev_address = address;
+	    prev_size = size;
+	    memcpy(&prev_info, &current_info, sizeof(vm_region_basic_info_data_64_t));
+	  }
+	else
+	  {
+	     prev_size += size;
+	  }
+      }
+  }
+
+error_return:
+  error (_("unable to find relocated dyld notifier address"));
+  return;
+   /* End shitty patch */
 }
 
 /* Link map info to include in an allocated so_list entry.  */
